@@ -21,6 +21,14 @@ you're done.
 
 ## Install
 
+Quick install (no clone needed):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/0rln/ssh-claude-skill/main/install.sh | bash
+```
+
+Or, from a clone, symlink it in place:
+
 ```bash
 ln -sfn "$PWD/ssh-remote" "$HOME/.claude/skills/ssh-remote"
 ln -sfn "$PWD/ssh-remote/scripts/ssh-remote.sh" "$HOME/.local/bin/ssh-remote"
