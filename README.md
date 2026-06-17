@@ -2,20 +2,10 @@
 
 A Claude Code skill for working on a remote machine without losing your Claude account.
 
-## The problem
 
 When you SSH into a box and run `claude` there, you're using *that machine's*
 Claude login - usually whoever owns the server, not you. So you either can't use
 Claude on remote work, or you end up on someone else's account.
-
-## The fix
-
-Don't run Claude on the remote at all. Your **local** Claude (your account)
-stays the brain, and SSH is just how it runs commands on the other machine. The
-remote only ever sees plain shell commands.
-
-It works over one persistent SSH connection: you authenticate once, and every
-command after that reuses it.
 
 ## Use it
 
