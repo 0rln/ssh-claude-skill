@@ -40,6 +40,18 @@ skill was triggered by a natural-language message instead of `/ssh-remote`, take
 Report in **one line**: `Connected to HOST` on `CONNECTED`, else the failure
 reason (wrong password / unreachable / timed out) on `NOT CONNECTED`.
 
+## Remote mode — everything runs on the host
+A successful connect **auto-engages remote mode** (the connect output says
+`REMOTE MODE on`). While it is on, a guard blocks plain local shell commands, so
+**run everything through `ssh-remote run HOST '...'`** — that is what makes it
+execute on the remote, not your laptop. (`Read`/`Edit`/`Write` still act locally;
+only the `Bash` tool is gated.)
+
+If a `Bash` call is blocked with `Locked to remote host`, that is expected: re-issue
+it as `ssh-remote run HOST '<that command>'`. Only run `ssh-remote remote-mode off`
+if the user explicitly asks to do local work. Check state with
+`ssh-remote remote-mode status`.
+
 ## Operate on the remote
 ```bash
 ssh-remote run HOST 'uname -a && whoami'
@@ -52,6 +64,11 @@ ssh-remote push HOST ./a /remote/b   |   ssh-remote pull HOST /remote/b ./a
 If a command prints **`SSH SESSION DOWN`** (exit 3): STOP, tell the user the
 session dropped/timed out, offer to reconnect with `/ssh-remote HOST`. Check any
 time with `ssh-remote status`. Real TTY (editor/top/sudo): `! ssh-remote shell HOST`.
+
+The session also expires on its own after ~4h idle. When it does, the Claude Code
+**status line** flips to `NOT CONNECTED to remote host HOST` (always visible), and
+the next `ssh-remote run` returns `SSH SESSION DOWN`. On either signal, tell the
+user it expired and offer `/ssh-remote HOST` to reconnect.
 
 ## Exit
 `ssh-remote disconnect HOST` (one) · `ssh-remote disconnect --all` (everything).

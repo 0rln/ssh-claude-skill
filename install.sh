@@ -29,7 +29,7 @@ say "Installing skill -> $SKILLS_DIR/ssh-remote"
 mkdir -p "$SKILLS_DIR"
 rm -rf "$SKILLS_DIR/ssh-remote"
 cp -R "$src" "$SKILLS_DIR/ssh-remote"
-chmod +x "$SKILLS_DIR/ssh-remote/scripts/ssh-remote.sh"
+chmod +x "$SKILLS_DIR/ssh-remote/scripts/"*.sh
 
 say "Linking CLI    -> $BIN_DIR/ssh-remote"
 mkdir -p "$BIN_DIR"

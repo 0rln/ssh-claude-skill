@@ -6,6 +6,10 @@ PERSIST="${SSH_REMOTE_PERSIST:-4h}"
 CONNECT_TIMEOUT="${SSH_REMOTE_CONNECT_TIMEOUT:-15}"
 RECENT_FILE="$SOCKET_DIR/recent"
 RECENT_MAX=10
+LOCK_FILE="$SOCKET_DIR/remote-mode"
+# Auto-engage remote mode on a successful connect (everything runs on the host).
+# Set SSH_REMOTE_AUTO_LOCK=0 to keep local-shell access after connecting.
+AUTO_LOCK="${SSH_REMOTE_AUTO_LOCK:-1}"
 
 if [ -t 1 ]; then
   C_GREEN=$'\033[32m'; C_RED=$'\033[31m'; C_YEL=$'\033[33m'
@@ -24,6 +28,24 @@ socket_for() {
 }
 is_up() { ssh -S "$1" -O check "$2" >/dev/null 2>&1; }
 persist_host() { printf '%s\n' "$2" > "$1.host"; }
+
+# --- remote mode lock: while set, the PreToolUse guard blocks local shell ---
+lock_host() { [ -f "$LOCK_FILE" ] && cat "$LOCK_FILE" 2>/dev/null || true; }
+lock_on()   { ensure_dir; printf '%s\n' "$1" > "$LOCK_FILE"; }
+lock_off()  { rm -f "$LOCK_FILE" 2>/dev/null || true; }
+
+# Single place that runs after any successful connect.
+on_connected() {
+  local target="$1"
+  record_recent "$target"
+  persist_host "$(socket_for "$target")" "$target"
+  print_connected "$target"
+  if [ "$AUTO_LOCK" = "1" ]; then
+    lock_on "$target"
+    printf '%s\n' "${C_YEL}${C_BOLD}Now running everything on $target${C_OFF} - local shell commands are blocked."
+    printf '%s\n' "  Work via ${C_BOLD}ssh-remote run $target '<cmd>'${C_OFF}  -  turn off with ${C_BOLD}ssh-remote remote-mode off${C_OFF}"
+  fi
+}
 
 record_recent() {
   local host="$1" tmp; ensure_dir
@@ -77,9 +99,14 @@ ssh-remote - drive a remote host over a persistent, multiplexed SSH connection.
   list                           List active session sockets
   disconnect <host> | --all      Close one session, or all of them   (alias: exit)
   statusline                     Compact one-line status for a Claude Code statusLine
+  remote-mode on <host>|off|status
+                                 Lock the shell to a host so everything runs on the remote.
+                                 While on, the PreToolUse guard blocks local commands and
+                                 forces `ssh-remote run`. Auto-engaged on connect (see env).
 
 Exit codes: 0 ok | 1 connect failed | 2 password required | 3 session down
-Env: SSH_REMOTE_PERSIST (4h), SSH_REMOTE_CONNECT_TIMEOUT (15), SSH_REMOTE_SOCKET_DIR
+Env: SSH_REMOTE_PERSIST (4h), SSH_REMOTE_CONNECT_TIMEOUT (15), SSH_REMOTE_SOCKET_DIR,
+     SSH_REMOTE_AUTO_LOCK (1 = engage remote mode on connect; 0 = keep local shell)
 USAGE
 }
 
@@ -155,7 +182,7 @@ cmd_connect() {
   local sock; sock="$(socket_for "$target")"
 
   if is_up "$sock" "$target"; then
-    record_recent "$target"; persist_host "$sock" "$target"; print_connected "$target"; return 0
+    on_connected "$target"; return 0
   fi
 
   local rc=0
@@ -163,7 +190,7 @@ cmd_connect() {
     password)
       connect_askpass "$target" "$sock" || rc=$?
       if [ "$rc" -eq 0 ] && is_up "$sock" "$target"; then
-        record_recent "$target"; persist_host "$sock" "$target"; print_connected "$target"; return 0
+        on_connected "$target"; return 0
       fi
       print_failed "$target" auth; exit 1 ;;
     interactive)
@@ -174,12 +201,12 @@ cmd_connect() {
           -fN "$target"
       rc=$?; set -e
       if [ "$rc" -eq 0 ] && is_up "$sock" "$target"; then
-        record_recent "$target"; persist_host "$sock" "$target"; print_connected "$target"; return 0
+        on_connected "$target"; return 0
       fi
       print_failed "$target" other; exit 1 ;;
     keyless)
       if keyless_connect "$target" "$sock"; then
-        record_recent "$target"; persist_host "$sock" "$target"; print_connected "$target"; return 0
+        on_connected "$target"; return 0
       fi
       if [ "${KEYLESS_CLASS:-other}" = "auth" ]; then
         printf '%s\n' "${C_YEL}PASSWORD_REQUIRED${C_OFF} - $target needs a password (no usable SSH key)."
@@ -230,6 +257,14 @@ status_line() {
 }
 cmd_status() {
   ensure_dir
+  local lk; lk="$(lock_host)"
+  if [ -n "$lk" ]; then
+    if is_up "$(socket_for "$lk")" "$lk"; then
+      printf '%s\n' "${C_BOLD}Locked to $lk${C_OFF} (live). Local shell is blocked; use ssh-remote run."
+    else
+      printf '%s\n' "${C_BOLD}Locked to $lk${C_OFF} - ${C_RED}NOT CONNECTED${C_OFF}. Reconnect: /ssh-remote $lk  (or turn off: ssh-remote remote-mode off)"
+    fi
+  fi
   local target="${1:-}"
   if [ -n "$target" ]; then
     printf '%s\n' "${C_BOLD}SSH session:${C_OFF}"
@@ -272,7 +307,8 @@ cmd_disconnect() {
       [ -n "$host" ] && ssh -S "$s" -O exit "$host" >/dev/null 2>&1 || true
       rm -f "$s" "$s.host"
     done
-    [ "$any" -eq 1 ] && printf '%s\n' "${C_GREEN}Disconnected all SSH sessions.${C_OFF}" || echo "No active sessions."
+    lock_off
+    [ "$any" -eq 1 ] && printf '%s\n' "${C_GREEN}Disconnected all SSH sessions.${C_OFF}  (remote mode off)" || echo "No active sessions."
     return 0
   fi
   local target="${1:-}"; [ -n "$target" ] || die "usage: ssh-remote disconnect <[user@]host> | --all"
@@ -284,17 +320,61 @@ cmd_disconnect() {
     printf 'No live session for %s.\n' "$target"
   fi
   rm -f "$sock" "$sock.host"
+  # If remote mode was locked to this host, release it.
+  [ "$(lock_host)" = "$target" ] && lock_off || true
 }
 
 cmd_statusline() {
   ensure_dir
+  # The Claude Code status line renders ANSI even though our stdout is not a TTY,
+  # so set colours explicitly here rather than via the TTY-gated globals above.
+  local g=$'\033[32m' r=$'\033[31m' b=$'\033[1m' d=$'\033[2m' o=$'\033[0m'
+  local lock; lock="$(lock_host)"
+  if [ -n "$lock" ]; then
+    if is_up "$(socket_for "$lock")" "$lock"; then
+      printf '%sconnected to %s%s' "$g" "$lock" "$o"
+    else
+      printf '%s%sNOT CONNECTED to %s%s %s- reconnect: /ssh-remote %s%s' \
+        "$r" "$b" "$lock" "$o" "$d" "$lock" "$o"
+    fi
+    return 0
+  fi
+  # No remote-mode lock: surface any live session quietly, else print nothing.
   shopt -s nullglob
-  local socks=("$SOCKET_DIR"/*.sock) out="" s host
+  local socks=("$SOCKET_DIR"/*.sock) up="" s host
   for s in ${socks[@]+"${socks[@]}"}; do
     host=""; [ -f "$s.host" ] && host="$(cat "$s.host")"; host="${host:-?}"
-    if is_up "$s" "$host"; then out="$out up:$host"; else out="$out down:$host"; fi
+    is_up "$s" "$host" && up="$up $host"
   done
-  [ -n "$out" ] && printf 'ssh:%s' "$out" || true
+  [ -n "$up" ] && printf '%sssh: connected to%s (remote-mode off)%s' "$d" "$up" "$o" || true
+}
+
+cmd_remote_mode() {
+  ensure_dir
+  local sub="${1:-status}"; shift || true
+  case "$sub" in
+    on)
+      local host="${1:-}"; [ -n "$host" ] || host="$(lock_host)"
+      [ -n "$host" ] || die "usage: ssh-remote remote-mode on <[user@]host>"
+      lock_on "$host"
+      printf '%s\n' "${C_YEL}${C_BOLD}Locked to $host${C_OFF} - everything runs on the remote; local shell commands are blocked."
+      printf '%s\n' "  Turn off with ${C_BOLD}ssh-remote remote-mode off${C_OFF}" ;;
+    off)
+      if [ -n "$(lock_host)" ]; then
+        lock_off; printf '%s\n' "${C_GREEN}Unlocked${C_OFF} - local shell commands run locally again."
+      else
+        printf 'Already unlocked (local shell runs locally).\n'
+      fi ;;
+    status|"")
+      local host; host="$(lock_host)"
+      if [ -z "$host" ]; then printf 'Not locked %s(local shell runs locally)%s.\n' "$C_DIM" "$C_OFF"; return 0; fi
+      if is_up "$(socket_for "$host")" "$host"; then
+        printf '%s\n' "Locked to ${C_BOLD}$host${C_OFF} (session live). Local shell is blocked; use ssh-remote run."
+      else
+        printf '%s\n' "Locked to ${C_BOLD}$host${C_OFF} - ${C_RED}NOT CONNECTED${C_OFF}. Reconnect: /ssh-remote $host  (or: ssh-remote remote-mode off)"
+      fi ;;
+    *) die "usage: ssh-remote remote-mode on <host> | off | status" ;;
+  esac
 }
 
 main() {
@@ -311,6 +391,7 @@ main() {
     list)             cmd_list "$@" ;;
     disconnect|exit)  cmd_disconnect "$@" ;;
     statusline)       cmd_statusline "$@" ;;
+    remote-mode|remote_mode|mode) cmd_remote_mode "$@" ;;
     ""|-h|--help|help) usage ;;
     *) die "unknown command: $cmd (try --help)" ;;
   esac
